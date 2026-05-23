@@ -19,6 +19,9 @@
 #include "app/generic.h"
 #include "app/menu.h"
 #include "app/scanner.h"
+#ifdef ENABLE_AUTO_LOG
+	#include "app/autolog.h"
+#endif
 #include "audio.h"
 #include "driver/bk4819.h"
 #include "frequencies.h"
@@ -40,6 +43,76 @@ bool              gScanUseCssResult;
 
 STEP_Setting_t    stepSetting;
 uint8_t           scanHitCount;
+
+
+#ifdef ENABLE_AUTO_LOG
+// LNA multiplex state: while in STATE_OFF we alternate VHF/UHF LNA every 2 s
+// so the freq counter has full sensitivity in each band. Starting OFF (both
+// disabled) is matched to what SCANNER_Start sets up; first 500ms tick flips
+// to VHF, second flips to UHF, etc.
+static uint8_t autolog_lna_phase;  // 0=off, 1=VHF, 2=UHF (cycles 1→2→1→...)
+
+static void AUTOLOG_RecordAndResume(void)
+{
+	if (!gAutoLogMode || gCssBackgroundScan)
+		return;
+
+	// Round to 2.5 kHz before dedup/storage. The BK4819 frequency counter
+	// has ~200 Hz of jitter, so 146.5 reads as 146.4998 / 146.5001 / etc.
+	// across passes — exact-match dedup would log each as a "new" channel.
+	const uint32_t freq = FREQUENCY_RoundToStep(gScanFrequency, 250);
+
+	bool dup = false;
+	for (uint8_t i = 0; i < gAutoLogCount; i++) {
+		if (gAutoLogs[i].frequency == freq) {
+			gAutoLogs[i].hit_count++;
+			dup = true;
+			break;
+		}
+	}
+
+	if (!dup) {
+		if (gAutoLogCount >= MAX_AUTO_LOGS) {
+			// buffer full: stop sweeping, leave state at FOUND so the
+			// user's EXIT press routes through SCANNER_Stop for flush.
+			gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
+			return;
+		}
+
+		gAutoLogs[gAutoLogCount].frequency = freq;
+		gAutoLogs[gAutoLogCount].code_type = gScanUseCssResult ? gScanCssResultType : CODE_TYPE_OFF;
+		gAutoLogs[gAutoLogCount].code_val  = gScanUseCssResult ? gScanCssResultCode : 0;
+		gAutoLogs[gAutoLogCount].hit_count = 1;
+		// Capture signal strength as dBm (using the same conversion the radio's
+		// main display uses) offset by 160 so it fits in a uint8_t.
+		gAutoLogs[gAutoLogCount].rssi = (uint8_t)(BK4819_GetRSSI_dBm() + 160);
+		gAutoLogCount++;
+		gBeepToPlay = BEEP_1KHZ_60MS_OPTIONAL;
+	}
+
+	// kick state machine back to phase 1 (frequency hunt).
+	gScanCssState          = SCAN_CSS_STATE_OFF;
+	gScanCssResultCode     = 0xFF;
+	gScanCssResultType     = 0xFF;
+	gScanUseCssResult      = false;
+	scanHitCount           = 0;
+	gScanProgressIndicator = 0;
+
+	if (gAutoLogScanMode == AUTOLOG_SCAN_SLOW) {
+		// SLOW: advance to the next freq step so a continuous carrier
+		// doesn't re-trigger us at the same frequency forever.
+		gRxVfo->freq_config_RX.Frequency = APP_SetFrequencyByStep(gRxVfo, 1);
+		RADIO_ApplyOffset(gRxVfo);
+		RADIO_ConfigureSquelchAndOutputPower(gRxVfo);
+		RADIO_SetupRegisters(true);
+	} else {
+		// FAST: restart the wideband freq counter
+		gScanFrequency = 0xFFFFFFFF;
+		BK4819_EnableFrequencyScan();
+	}
+	gScanDelay_10ms = scan_delay_10ms;
+}
+#endif
 
 
 static void SCANNER_Key_DIGITS(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld)
@@ -339,10 +412,22 @@ void SCANNER_Start(bool singleFreq)
 	}
 	else {
 		gScanCssState  = SCAN_CSS_STATE_OFF;
-		gScanFrequency = 0xFFFFFFFF;
 
-		BK4819_PickRXFilterPathBasedOnFrequency(gScanFrequency);
-		BK4819_EnableFrequencyScan();
+#ifdef ENABLE_AUTO_LOG
+		if (gAutoLogMode && gAutoLogScanMode == AUTOLOG_SCAN_SLOW) {
+			// SLOW: stay tuned at the VFO's current frequency with the
+			// normal RX path. STATE_OFF's tick handler will step + check
+			// squelch from here.
+			gScanFrequency = gRxVfo->pRX->Frequency;
+			BK4819_PickRXFilterPathBasedOnFrequency(gScanFrequency);
+			// no BK4819_EnableFrequencyScan — using normal squelch path
+		} else
+#endif
+		{
+			gScanFrequency = 0xFFFFFFFF;
+			BK4819_PickRXFilterPathBasedOnFrequency(gScanFrequency);
+			BK4819_EnableFrequencyScan();
+		}
 
 		gUpdateStatus = true;
 	}
@@ -371,6 +456,10 @@ void SCANNER_Start(bool singleFreq)
 void SCANNER_Stop(void)
 {
 	if(SCANNER_IsScanning()) {
+#ifdef ENABLE_AUTO_LOG
+		if (gAutoLogMode)
+			AUTOLOG_Flush();
+#endif
 		gEeprom.CROSS_BAND_RX_TX = gBackup_CROSS_BAND_RX_TX;
 		gVfoConfigureMode        = VFO_CONFIGURE_RELOAD;
 		gFlagResetVfos           = true;
@@ -400,7 +489,31 @@ void SCANNER_TimeSlice10ms(void)
 
 	switch (gScanCssState) {
 		case SCAN_CSS_STATE_OFF: {
-			// must be RF frequency scanning if we're here ?
+#ifdef ENABLE_AUTO_LOG
+			if (gAutoLogMode && gAutoLogScanMode == AUTOLOG_SCAN_SLOW) {
+				// SLOW mode: full-sensitivity squelch check at each freq.
+				// On squelch open → log freq-only and advance. CTCSS/DCS
+				// detection in SLOW is a TODO — making it work requires
+				// switching the chip between normal RX and CSS scan modes
+				// per hit, and the timing/state coordination with the rest
+				// of the firmware has been flaky. For CTCSS-bearing
+				// channels, use FAST mode instead (works correctly).
+				if (g_SquelchLost) {
+					gScanFrequency    = gRxVfo->pRX->Frequency;
+					gScanUseCssResult = false;
+					AUTOLOG_RecordAndResume();  // records + advances one step
+				} else {
+					gRxVfo->freq_config_RX.Frequency =
+						APP_SetFrequencyByStep(gRxVfo, 1);
+					RADIO_ApplyOffset(gRxVfo);
+					RADIO_ConfigureSquelchAndOutputPower(gRxVfo);
+					RADIO_SetupRegisters(true);
+				}
+				gScanDelay_10ms = 9;   // ~90 ms dwell per channel
+				break;
+			}
+#endif
+			// FAST mode: BK4819 hardware frequency counter
 			uint32_t result;
 			if (!BK4819_GetFrequencyScanResult(&result))
 				break;
@@ -483,6 +596,13 @@ void SCANNER_TimeSlice10ms(void)
 				break;
 			}
 
+#ifdef ENABLE_AUTO_LOG
+			if (gAutoLogMode && !gCssBackgroundScan) {
+				AUTOLOG_RecordAndResume();
+				break;
+			}
+#endif
+
 			if(gCssBackgroundScan) {
 				gCssBackgroundScan = false;
 				if(gScanUseCssResult)
@@ -513,6 +633,29 @@ void SCANNER_TimeSlice500ms(void)
 				gScanCssState = SCAN_CSS_STATE_FAILED;
 
 			gUpdateStatus = true;
+		}
+#endif
+#ifdef ENABLE_AUTO_LOG
+		// 2-second dwell timeout when auto-logging: if a carrier is locked
+		// (STATE_SCANNING) but no CSS is detected, record as frequency-only
+		// and resume sweep. Independent of ENABLE_NO_CODE_SCAN_TIMEOUT.
+		if (gAutoLogMode && !gCssBackgroundScan &&
+			gScanCssState == SCAN_CSS_STATE_SCANNING &&
+			gScanProgressIndicator > 4) {
+			AUTOLOG_RecordAndResume();
+		}
+
+		// LNA multiplex: in STATE_OFF, flip VHF↔UHF LNA every 4 ticks (2 s)
+		// so distant signals like NOAA (~S6) can break through. First flip
+		// happens at tick 1 (0.5 s) to minimize the both-off warm-up window
+		// SCANNER_Start sets up. STATE_SCANNING is left alone so CTCSS
+		// detection isn't interrupted.
+		if (gAutoLogMode && !gCssBackgroundScan &&
+			gScanCssState == SCAN_CSS_STATE_OFF &&
+			(gScanProgressIndicator & 3) == 1) {
+			autolog_lna_phase = (autolog_lna_phase == 1) ? 2 : 1;
+			BK4819_PickRXFilterPathBasedOnFrequency(
+				(autolog_lna_phase == 1) ? 14600000 : 44600000);
 		}
 #endif
 		gUpdateDisplay = true;

@@ -71,6 +71,12 @@ const t_menu_item MenuList[] =
 	{"F2Shrt",    VOICE_ID_INVALID,                    MENU_F2SHRT        },
 	{"F2Long",    VOICE_ID_INVALID,                    MENU_F2LONG        },
 	{"M Long",    VOICE_ID_INVALID,                    MENU_MLONG         },
+#ifdef ENABLE_BEACON
+	{"BcnInt", VOICE_ID_INVALID,                       MENU_BCNINT        },
+#endif
+#ifdef ENABLE_AUTO_LOG
+	{"ScanMd", VOICE_ID_INVALID,                       MENU_SCAN_MD       },
+#endif
 
 	{"KeyLck", VOICE_ID_INVALID,                       MENU_AUTOLK        }, // was "AUTOLk"
 	{"TxTOut", VOICE_ID_TRANSMIT_OVER_TIME,            MENU_TOT           }, // was "TOT"
@@ -218,6 +224,33 @@ const char gSubMenu_SC_REV[][8] =
 	"STOP"
 };
 
+#ifdef ENABLE_BEACON
+// OFF  = beacon fully disabled (DTMF triggers ignored too)
+// ON   = DTMF triggers honoured, no periodic auto-TX
+// 30S+ = DTMF triggers honoured + periodic auto-TX at the interval
+const char gSubMenu_BCNINT[][4] =
+{
+	"OFF",
+	"ON",
+	"30S",
+	"1M",
+	"5M",
+	"10M",
+	"15M",
+	"30M"
+};
+#endif
+
+#ifdef ENABLE_AUTO_LOG
+// FAST = BK4819 wideband freq counter (fast, lower sensitivity)
+// SLOW = channel-by-channel sweep (slower, full receiver sensitivity)
+const char gSubMenu_SCAN_MD[][5] =
+{
+	"FAST",
+	"SLOW"
+};
+#endif
+
 const char* const gSubMenu_MDF[] =
 {
 	"FREQ",
@@ -363,7 +396,10 @@ const t_sidefunction gSubMenu_SIDEFUNCTIONS[] =
 	{"BLMIN\nTMP OFF",  ACTION_OPT_BLMIN_TMP_OFF}, 		//BackLight Minimum Temporay OFF
 #endif
 #ifdef ENABLE_SPECTRUM
-	{"SPECTRUM",         ACTION_OPT_SPECTRUM}
+	{"SPECTRUM",         ACTION_OPT_SPECTRUM},
+#endif
+#ifdef ENABLE_AUTO_LOG
+	{"AUTO\nLOG",        ACTION_OPT_AUTO_LOG}
 #endif
 };
 
@@ -714,6 +750,18 @@ void UI_DisplayMenu(void)
 		case MENU_SC_REV:
 			strcpy(String, gSubMenu_SC_REV[gSubMenuSelection]);
 			break;
+
+#ifdef ENABLE_BEACON
+		case MENU_BCNINT:
+			strcpy(String, gSubMenu_BCNINT[gSubMenuSelection]);
+			break;
+#endif
+
+#ifdef ENABLE_AUTO_LOG
+		case MENU_SCAN_MD:
+			strcpy(String, gSubMenu_SCAN_MD[gSubMenuSelection]);
+			break;
+#endif
 
 		case MENU_MDF:
 			strcpy(String, gSubMenu_MDF[gSubMenuSelection]);

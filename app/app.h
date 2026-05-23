@@ -30,7 +30,15 @@ uint32_t APP_SetFrequencyByStep(VFO_Info_t *pInfo, int8_t direction);
 void     APP_Update(void);
 void     APP_TimeSlice10ms(void);
 void     APP_TimeSlice500ms(void);
-extern bool gBeaconActive;
+
+#ifdef ENABLE_BEACON
+extern bool     gBeaconActive;
+extern uint8_t  gBeaconRepeats;
+extern uint8_t  gBeaconInterval;             // 0=off, 1..6 = interval index
+extern uint16_t gBeaconPeriodCountdown_500ms;
+extern const uint16_t beacon_intervals_500ms[];
 void BEACON_Process(void);
+#endif
+
 #endif
 

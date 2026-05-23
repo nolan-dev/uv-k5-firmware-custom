@@ -19,6 +19,10 @@
 #if !defined(ENABLE_OVERLAY)
 	#include "ARMCM0.h"
 #endif
+#include "app/app.h"
+#ifdef ENABLE_AUTO_LOG
+	#include "app/autolog.h"
+#endif
 #include "app/dtmf.h"
 #include "app/generic.h"
 #include "app/menu.h"
@@ -176,6 +180,20 @@ int MENU_GetLimits(uint8_t menu_id, int32_t *pMin, int32_t *pMax)
 			*pMin = 0;
 			*pMax = ARRAY_SIZE(gSubMenu_SC_REV) - 1;
 			break;
+
+#ifdef ENABLE_BEACON
+		case MENU_BCNINT:
+			*pMin = 0;
+			*pMax = ARRAY_SIZE(gSubMenu_BCNINT) - 1;
+			break;
+#endif
+
+#ifdef ENABLE_AUTO_LOG
+		case MENU_SCAN_MD:
+			*pMin = 0;
+			*pMax = ARRAY_SIZE(gSubMenu_SCAN_MD) - 1;
+			break;
+#endif
 
 		case MENU_ROGER:
 			*pMin = 0;
@@ -563,6 +581,26 @@ void MENU_AcceptSetting(void)
 		case MENU_SC_REV:
 			gEeprom.SCAN_RESUME_MODE = gSubMenuSelection;
 			break;
+
+#ifdef ENABLE_BEACON
+		case MENU_BCNINT:
+			gBeaconInterval = gSubMenuSelection;
+			// reload countdown so the new interval kicks in immediately
+			gBeaconPeriodCountdown_500ms = beacon_intervals_500ms[gBeaconInterval];
+			// Setting BCNINT to OFF mid-transmission gracefully stops the
+			// in-flight beacon at the end of the current message (the state
+			// machine's "if (gBeaconRepeats > 1) repeat else terminate" check
+			// will now fall through to terminate).
+			if (gBeaconInterval == 0 && gBeaconActive)
+				gBeaconRepeats = 0;
+			break;
+#endif
+
+#ifdef ENABLE_AUTO_LOG
+		case MENU_SCAN_MD:
+			gAutoLogScanMode = gSubMenuSelection;
+			break;
+#endif
 
 		case MENU_MDF:
 			gEeprom.CHANNEL_DISPLAY_MODE = gSubMenuSelection;
@@ -967,6 +1005,18 @@ void MENU_ShowCurrentSetting(void)
 		case MENU_SC_REV:
 			gSubMenuSelection = gEeprom.SCAN_RESUME_MODE;
 			break;
+
+#ifdef ENABLE_BEACON
+		case MENU_BCNINT:
+			gSubMenuSelection = gBeaconInterval;
+			break;
+#endif
+
+#ifdef ENABLE_AUTO_LOG
+		case MENU_SCAN_MD:
+			gSubMenuSelection = gAutoLogScanMode;
+			break;
+#endif
 
 		case MENU_MDF:
 			gSubMenuSelection = gEeprom.CHANNEL_DISPLAY_MODE;

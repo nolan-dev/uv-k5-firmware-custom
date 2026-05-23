@@ -6,7 +6,7 @@
 # ---- STOCK QUANSHENG FERATURES ----
 ENABLE_UART                   ?= 1
 ENABLE_AIRCOPY                ?= 0
-ENABLE_FMRADIO                ?= 1
+ENABLE_FMRADIO                ?= 0
 ENABLE_NOAA                   ?= 0
 ENABLE_VOICE                  ?= 0
 ENABLE_VOX                    ?= 0 #modified
@@ -17,8 +17,8 @@ ENABLE_DTMF_CALLING           ?= 1
 ENABLE_FLASHLIGHT             ?= 1
 
 # ---- CUSTOM MODS ----
-ENABLE_BIG_FREQ               ?= 1
-ENABLE_SMALL_BOLD             ?= 1
+ENABLE_BIG_FREQ               ?= 0
+ENABLE_SMALL_BOLD             ?= 0
 ENABLE_CUSTOM_MENU_LAYOUT     ?= 1
 ENABLE_KEEP_MEM_NAME          ?= 1
 ENABLE_WIDE_RX                ?= 1
@@ -40,6 +40,8 @@ ENABLE_REDUCE_LOW_MID_TX_POWER?= 0
 ENABLE_BYP_RAW_DEMODULATORS   ?= 0
 ENABLE_BLMIN_TMP_OFF          ?= 0
 ENABLE_SCAN_RANGES            ?= 1
+ENABLE_AUTO_LOG               ?= 1
+ENABLE_BEACON                 ?= 1
 
 # ---- DEBUGGING ----
 ENABLE_AM_FIX_SHOW_DATA       ?= 0
@@ -129,6 +131,9 @@ ifeq ($(ENABLE_SPECTRUM), 1)
 OBJS += app/spectrum.o
 endif
 OBJS += app/scanner.o
+ifeq ($(ENABLE_AUTO_LOG),1)
+	OBJS += app/autolog.o
+endif
 ifeq ($(ENABLE_UART),1)
 	OBJS += app/uart.o
 endif
@@ -361,6 +366,12 @@ ifeq ($(ENABLE_BLMIN_TMP_OFF),1)
 endif
 ifeq ($(ENABLE_SCAN_RANGES),1)
 	CFLAGS  += -DENABLE_SCAN_RANGES
+endif
+ifeq ($(ENABLE_AUTO_LOG),1)
+	CFLAGS  += -DENABLE_AUTO_LOG
+endif
+ifeq ($(ENABLE_BEACON),1)
+	CFLAGS  += -DENABLE_BEACON
 endif
 ifeq ($(ENABLE_DTMF_CALLING),1)
 	CFLAGS  += -DENABLE_DTMF_CALLING

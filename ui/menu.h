@@ -123,7 +123,13 @@ enum
 	MENU_F2SHRT,
 	MENU_F2LONG,
 	MENU_MLONG,
-	MENU_BATTYP
+	MENU_BATTYP,
+#ifdef ENABLE_BEACON
+	MENU_BCNINT,
+#endif
+#ifdef ENABLE_AUTO_LOG
+	MENU_SCAN_MD
+#endif
 };
 
 extern const uint8_t FIRST_HIDDEN_MENU_ITEM;
@@ -141,6 +147,12 @@ extern const char* const gSubMenu_RXMode[4];
 	extern const char    gSubMenu_VOICE[3][4];
 #endif
 extern const char        gSubMenu_SC_REV[3][8];
+#ifdef ENABLE_BEACON
+extern const char        gSubMenu_BCNINT[8][4];
+#endif
+#ifdef ENABLE_AUTO_LOG
+extern const char        gSubMenu_SCAN_MD[2][5];
+#endif
 extern const char* const gSubMenu_MDF[4];
 #ifdef ENABLE_ALARM
 	extern const char    gSubMenu_AL_MOD[2][5];

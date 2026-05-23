@@ -63,10 +63,30 @@ void UI_DisplayWelcome(void)
 		}
 		else
 		{
-			//EEPROM_ReadBuffer(0x0EB0, WelcomeString0, 16);
-			//EEPROM_ReadBuffer(0x0EC0, WelcomeString1, 16);
-			strcpy(WelcomeString0, "KO6NBM");
-			strcpy(WelcomeString1, "HELLO WORLD");
+			// Welcome screen identifies which feature build is on this radio.
+			// Line 0 = build identifier, Line 1 = compact feature codes (+ on,
+			// - off vs upstream default). Useful for telling apart the
+			// scanning-radio vs beacon-radio vs both-radio builds at boot.
+#if defined(ENABLE_AUTO_LOG) && defined(ENABLE_BEACON)
+			strcpy(WelcomeString0, "SCAN+BCN");
+#elif defined(ENABLE_AUTO_LOG)
+			strcpy(WelcomeString0, "SCAN");
+#elif defined(ENABLE_BEACON)
+			strcpy(WelcomeString0, "BEACON");
+#else
+			strcpy(WelcomeString0, "BASIC");
+#endif
+			strcpy(WelcomeString1,
+#ifdef ENABLE_AUTO_LOG
+				"+L"
+#endif
+#ifdef ENABLE_BEACON
+				"+B"
+#endif
+#ifndef ENABLE_FMRADIO
+				" -FM"
+#endif
+			);
 		}
 
 		UI_PrintString(WelcomeString0, 0, 127, 0, 10);

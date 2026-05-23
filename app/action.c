@@ -29,6 +29,9 @@
 	#include "app/fm.h"
 #endif
 #include "app/scanner.h"
+#ifdef ENABLE_AUTO_LOG
+	#include "app/autolog.h"
+#endif
 #include "audio.h"
 #include "bsp/dp32g030/gpio.h"
 #ifdef ENABLE_FMRADIO
@@ -58,6 +61,22 @@ inline static void ACTION_1750() { ACTION_AlarmOr1750(true); };
 #endif
 
 inline static void ACTION_ScanRestart() { ACTION_Scan(true); };
+
+#ifdef ENABLE_AUTO_LOG
+static void ACTION_AutoLog(void)
+{
+	gAutoLogMode  = true;
+	gAutoLogCount = 0;
+
+	gBackup_CROSS_BAND_RX_TX = gEeprom.CROSS_BAND_RX_TX;
+	gEeprom.CROSS_BAND_RX_TX = CROSS_BAND_OFF;
+	gUpdateStatus            = true;
+	gBeepToPlay              = BEEP_1KHZ_60MS_OPTIONAL;
+
+	SCANNER_Start(false);
+	gRequestDisplayScreen = DISPLAY_SCANNER;
+}
+#endif
 
 void (*action_opt_table[])(void) = {
 	[ACTION_OPT_NONE] = &FUNCTION_NOP,
@@ -109,6 +128,12 @@ void (*action_opt_table[])(void) = {
 	[ACTION_OPT_SPECTRUM] = &APP_RunSpectrum,
 #else
 	[ACTION_OPT_SPECTRUM] = &FUNCTION_NOP,
+#endif
+
+#ifdef ENABLE_AUTO_LOG
+	[ACTION_OPT_AUTO_LOG] = &ACTION_AutoLog,
+#else
+	[ACTION_OPT_AUTO_LOG] = &FUNCTION_NOP,
 #endif
 };
 

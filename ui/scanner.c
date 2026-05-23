@@ -17,10 +17,14 @@
 #include <stdbool.h>
 #include <string.h>
 #include "app/scanner.h"
+#ifdef ENABLE_AUTO_LOG
+	#include "app/autolog.h"
+#endif
 #include "dcs.h"
 #include "driver/st7565.h"
 #include "external/printf/printf.h"
 #include "misc.h"
+#include "radio.h"
 #include "ui/helper.h"
 #include "ui/scanner.h"
 
@@ -36,7 +40,20 @@ void UI_DisplayScanner(void)
 	if (gScanSingleFrequency || (gScanCssState != SCAN_CSS_STATE_OFF && gScanCssState != SCAN_CSS_STATE_FAILED)) {
 		sprintf(String, "FREQ:%u.%05u", gScanFrequency / 100000, gScanFrequency % 100000);
 		pPrintStr = String;
-	} else {
+	}
+#ifdef ENABLE_AUTO_LOG
+	else if (gAutoLogMode && gAutoLogScanMode == AUTOLOG_SCAN_SLOW) {
+		// SLOW + STATE_OFF: show the live step frequency. Append " RX" when
+		// squelch is open so the user knows the radio is hearing something
+		// before the state machine has transitioned out of STATE_OFF.
+		const uint32_t f = gRxVfo->pRX->Frequency;
+		sprintf(String, "FREQ:%u.%05u%s",
+			f / 100000, f % 100000,
+			g_SquelchLost ? " RX" : "");
+		pPrintStr = String;
+	}
+#endif
+	else {
 		pPrintStr = "FREQ:**.*****";
 	}
 

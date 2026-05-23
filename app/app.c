@@ -25,6 +25,9 @@
 	#include "app/aircopy.h"
 #endif
 #include "app/app.h"
+#ifdef ENABLE_AUTO_LOG
+	#include "app/autolog.h"
+#endif
 #include "app/chFrScanner.h"
 #include "app/dtmf.h"
 #ifdef ENABLE_FLASHLIGHT
@@ -83,9 +86,17 @@ static bool flagSaveChannel;
 #include "radio.h"
 #include "driver/bk4819.h"
 
+#ifdef ENABLE_BEACON
 bool gBeaconActive = false;
 uint8_t gBeaconRepeats = 0;
-const char beacon_msg[] = "-.- --- -.... -. -... --"; 
+uint8_t gBeaconInterval = 0;
+uint16_t gBeaconPeriodCountdown_500ms = 0;
+// 500ms-tick count per BCNINT option.
+//   0=OFF (no beacon at all)
+//   1=ON  (DTMF triggers honoured, no periodic — period 0 means never fires)
+//   2..7 = periodic intervals: 30s, 1min, 5min, 10min, 15min, 30min
+const uint16_t beacon_intervals_500ms[] = {0, 0, 60, 120, 600, 1200, 1800, 3600};
+static const char beacon_msg[] = "-.- --- -.... -. -... --";
 #define CW_UNIT_TICKS 8     // 8 ticks * 10ms = 80ms unit = 15 WPM
 #define CW_FREQ 800
 
@@ -93,8 +104,8 @@ void BEACON_Process(void) {
     // 1. Hardware-level SysTick Tracker (Runs continuously)
     static uint32_t custom_10ms_ticks = 0;
     static uint32_t last_systick = 0;
-    uint32_t current_systick = (*((volatile uint32_t *)0xE000E018)); 
-    
+    uint32_t current_systick = (*((volatile uint32_t *)0xE000E018));
+
     if (current_systick > last_systick) {
         custom_10ms_ticks++;
     }
@@ -107,8 +118,8 @@ void BEACON_Process(void) {
     static uint16_t msg_idx = 0;
     static uint8_t state = 0;
 
-    uint32_t now = custom_10ms_ticks; 
-    
+    uint32_t now = custom_10ms_ticks;
+
     if (now < next_tick) return;
 
     char dbg[32];
@@ -119,7 +130,7 @@ void BEACON_Process(void) {
         case 0:
             // Key up: bring the carrier up via the normal TX path.
             FUNCTION_Select(FUNCTION_TRANSMIT);
-            
+
             // Wait for PLL lock / PA ramp before configuring the tone.
             next_tick = now + 5;   // ~50ms
             state = 5;
@@ -127,13 +138,9 @@ void BEACON_Process(void) {
 
         case 5:
             // Configure the tone generator and enable the TX audio link.
-            // bLocalLoopback=false: don't route to speaker (no sidetone).
-            // Pass true if you want to hear it on the HT's speaker.
             BK4819_TransmitTone(false, CW_FREQ);
-            // TransmitTone leaves the path UNmuted. We want it muted by
-            // default so we can key it on per element.
             BK4819_EnterTxMute();
-            
+
             next_tick = now + 5;   // small settling pad
             state = 1;
             msg_idx = 0;
@@ -144,11 +151,11 @@ void BEACON_Process(void) {
                 if (gBeaconRepeats > 1) {
                     gBeaconRepeats--;
                     msg_idx = 0;
-                    BK4819_EnterTxMute();  // Ensure silence between broadcasts
-                    next_tick = now + 100; // 100 ticks = 1 second gap between repeats
+                    BK4819_EnterTxMute();
+                    next_tick = now + 100;
                 } else {
                     state = 4;
-                    next_tick = now; 
+                    next_tick = now;
                 }
             } else if (beacon_msg[msg_idx] == '-') {
                 BK4819_ExitTxMute();           // key down (dah)
@@ -159,46 +166,33 @@ void BEACON_Process(void) {
                 next_tick = now + (1 * CW_UNIT_TICKS);
                 state = 2;
             } else if (beacon_msg[msg_idx] == ' ') {
-                // Already had 1u gap after the previous element (state 2).
-                // Add 2u more for a total 3u inter-character gap.
                 next_tick = now + (2 * CW_UNIT_TICKS);
                 msg_idx++;
                 state = 1;
             } else {
-                // Unknown symbol — skip it.
                 msg_idx++;
             }
             break;
 
         case 2:
-            // End of dit/dah: mute the TX audio and hold for 1u intra-element gap.
             BK4819_EnterTxMute();
             next_tick = now + (1 * CW_UNIT_TICKS);
             msg_idx++;
             state = 1;
             break;
 
-		case 4:
-					// 1. Mute the audio path
-					BK4819_EnterTxMute();
-					
-					// 2. Hard-kill the Power Amplifier immediately 
-					BK4819_SetupPowerAmplifier(0, 0); 
-
-					// Now switch software state
-   					FUNCTION_Select(FUNCTION_FOREGROUND);
-					
-					// 4. Reconfigure hardware registers for RX
-					RADIO_SetupRegisters(true); 
-					
-					// 5. Force UI to clear the TX indicators
-					gUpdateDisplay = true; 
-					
-					gBeaconActive = false;
-					state = 0;
-					break;
+        case 4:
+            BK4819_EnterTxMute();
+            BK4819_SetupPowerAmplifier(0, 0);
+            FUNCTION_Select(FUNCTION_FOREGROUND);
+            RADIO_SetupRegisters(true);
+            gUpdateDisplay = true;
+            gBeaconActive = false;
+            state = 0;
+            break;
     }
 }
+#endif
 
 static void ProcessKey(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld);
 
@@ -225,6 +219,15 @@ static void CheckForIncoming(void)
 {
 	if (!g_SquelchLost)
 		return;          // squelch is closed
+
+#ifdef ENABLE_AUTO_LOG
+	// During SLOW auto-log scan, the scanner walks frequencies looking for
+	// hits and just notes them — we are NOT trying to listen. Suppress the
+	// normal FOREGROUND→INCOMING→RECEIVE pipeline that would enable audio,
+	// toggle the green LED, and contend with the scanner for chip control.
+	if (gAutoLogMode && gAutoLogScanMode == AUTOLOG_SCAN_SLOW)
+		return;
+#endif
 
 	// squelch is open
 
@@ -684,7 +687,16 @@ static void DualwatchAlternate(void)
 
 static void CheckRadioInterrupts(void)
 {
-	if (SCANNER_IsScanning())
+	// FAST auto-log and the regular CSS scanner poll the BK4819 directly via
+	// BK4819_GetFrequencyScanResult / GetCxCSSScanResult — they don't need
+	// the interrupt-driven squelch flag. SLOW auto-log scan DOES need it
+	// (the squelch-lost interrupt is how we know a stepped frequency has
+	// signal), so allow this function to run in that one case.
+	if (SCANNER_IsScanning()
+#ifdef ENABLE_AUTO_LOG
+		&& !(gAutoLogMode && gAutoLogScanMode == AUTOLOG_SCAN_SLOW)
+#endif
+	)
 		return;
 
 	while (BK4819_ReadRegister(BK4819_REG_0C) & 1u) { // BK chip interrupt request
@@ -769,21 +781,25 @@ static void CheckRadioInterrupts(void)
 							memset(gDTMF_RX_live, 0, sizeof(gDTMF_RX_live));
 							UART_Send((uint8_t*)"Power Updated\r\n", 15);
 						}
+#ifdef ENABLE_BEACON
 						// --- CUSTOM BEACON TRIGGER ---
+						// gBeaconInterval == 0 (OFF) blocks DTMF triggers entirely
+						// so a stranger's *1N doesn't make this radio key up.
 						char *ptr_beacon = strstr(gDTMF_RX_live, "*1");
-						if (ptr_beacon != NULL && strlen(ptr_beacon) == 3) {
+						if (ptr_beacon != NULL && strlen(ptr_beacon) == 3 && gBeaconInterval > 0) {
 							char repeat_cmd = ptr_beacon[2];
-							
+
 							// Accept values from 1 to 9
 							if (repeat_cmd >= '1' && repeat_cmd <= '9') {
 								gBeaconRepeats = repeat_cmd - '0'; // Convert ASCII char to integer
 								gBeaconActive = true;
-								
+
 								memset(gDTMF_RX_live, 0, sizeof(gDTMF_RX_live));
 								UART_Send((uint8_t*)"Beacon Triggered\r\n", 18);
 							}
 						}
 						// -----------------------------
+#endif
 					}
 #ifdef ENABLE_DTMF_CALLING
 					if (gRxVfo->DTMF_DECODING_ENABLE || gSetting_KILLED) {
@@ -965,7 +981,9 @@ static void HandleVox(void)
 
 void APP_Update(void)
 {
+#ifdef ENABLE_BEACON
 	BEACON_Process();
+#endif
 #ifdef ENABLE_VOICE
 	if (gFlagPlayQueuedVoice) {
 			AUDIO_PlayQueuedVoice();
@@ -1431,6 +1449,21 @@ void APP_TimeSlice500ms(void)
 {
 	gNextTimeslice_500ms = false;
 	bool exit_menu = false;
+
+#ifdef ENABLE_BEACON
+	// Periodic-beacon tick: only fires when gBeaconInterval >= 2 (an actual
+	// interval is selected). interval=0 (OFF) and interval=1 (ON, DTMF-only)
+	// both skip this entirely.
+	if (gBeaconInterval >= 2 && !gBeaconActive) {
+		if (gBeaconPeriodCountdown_500ms > 0) {
+			gBeaconPeriodCountdown_500ms--;
+		} else {
+			gBeaconRepeats = 1;
+			gBeaconActive  = true;
+			gBeaconPeriodCountdown_500ms = beacon_intervals_500ms[gBeaconInterval];
+		}
+	}
+#endif
 
 	// Skipped authentic device check
 

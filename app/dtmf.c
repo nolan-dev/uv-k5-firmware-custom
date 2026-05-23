@@ -18,6 +18,7 @@
 #include <stdio.h>   // NULL
 
 #include "app/chFrScanner.h"
+#include "app/app.h"
 #ifdef ENABLE_FMRADIO
 	#include "app/fm.h"
 #endif
@@ -276,7 +277,11 @@ void DTMF_HandleRequest(void)
 
 		if (CompareMessage(gDTMF_RX + Offset, pBeaconStr, strlen(pBeaconStr), true))
 		{
-			gBeaconActive = true;
+#ifdef ENABLE_BEACON
+			// gBeaconInterval == 0 (OFF) blocks the trigger entirely.
+			if (gBeaconInterval > 0)
+				gBeaconActive = true;
+#endif
 			DTMF_clear_RX();
 			return; // Exit out of normal DTMF parsing
 		}

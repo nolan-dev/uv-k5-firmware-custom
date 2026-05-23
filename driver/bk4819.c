@@ -1548,7 +1548,13 @@ void BK4819_EnableFrequencyScan(void)
 	//         0 = disable
 	//
 	BK4819_WriteRegister(BK4819_REG_32, // 0x0245);   // 00 0000100100010 1
-		(  0u << 14) |          // 0 frequency scan time
+		(  0u << 14) |          // 0 = 0.2 s integration. Originally 1.6 s was
+		                        //   tried for NOAA sensitivity but with the
+		                        //   LNA multiplex flipping VHF/UHF every 2 s
+		                        //   that long a window almost always saw an
+		                        //   LNA change mid-integration, corrupting
+		                        //   results. SLOW scan mode now handles
+		                        //   sensitive detection; FAST stays fast.
 		(290u <<  1) |          // ???
 		(  1u <<  0));          // 1 frequency scan enable
 }
