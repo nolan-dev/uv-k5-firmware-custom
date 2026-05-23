@@ -76,6 +76,130 @@ static bool flagSaveVfo;
 static bool flagSaveSettings;
 static bool flagSaveChannel;
 
+
+#include <stdio.h>
+#include <string.h>
+#include "driver/uart.h"
+#include "radio.h"
+#include "driver/bk4819.h"
+
+bool gBeaconActive = false;
+uint8_t gBeaconRepeats = 0;
+const char beacon_msg[] = "-.- --- -.... -. -... --"; 
+#define CW_UNIT_TICKS 8     // 8 ticks * 10ms = 80ms unit = 15 WPM
+#define CW_FREQ 800
+
+void BEACON_Process(void) {
+    // 1. Hardware-level SysTick Tracker (Runs continuously)
+    static uint32_t custom_10ms_ticks = 0;
+    static uint32_t last_systick = 0;
+    uint32_t current_systick = (*((volatile uint32_t *)0xE000E018)); 
+    
+    if (current_systick > last_systick) {
+        custom_10ms_ticks++;
+    }
+    last_systick = current_systick;
+
+    // 2. Beacon State Machine
+    if (!gBeaconActive) return;
+
+    static uint32_t next_tick = 0;
+    static uint16_t msg_idx = 0;
+    static uint8_t state = 0;
+
+    uint32_t now = custom_10ms_ticks; 
+    
+    if (now < next_tick) return;
+
+    char dbg[32];
+    sprintf(dbg, "beacon state %d idx %d\r\n", state, msg_idx);
+    UART_Send((uint8_t*)dbg, strlen(dbg));
+
+    switch(state) {
+        case 0:
+            // Key up: bring the carrier up via the normal TX path.
+            FUNCTION_Select(FUNCTION_TRANSMIT);
+            
+            // Wait for PLL lock / PA ramp before configuring the tone.
+            next_tick = now + 5;   // ~50ms
+            state = 5;
+            break;
+
+        case 5:
+            // Configure the tone generator and enable the TX audio link.
+            // bLocalLoopback=false: don't route to speaker (no sidetone).
+            // Pass true if you want to hear it on the HT's speaker.
+            BK4819_TransmitTone(false, CW_FREQ);
+            // TransmitTone leaves the path UNmuted. We want it muted by
+            // default so we can key it on per element.
+            BK4819_EnterTxMute();
+            
+            next_tick = now + 5;   // small settling pad
+            state = 1;
+            msg_idx = 0;
+            break;
+
+        case 1:
+            if (beacon_msg[msg_idx] == '\0') {
+                if (gBeaconRepeats > 1) {
+                    gBeaconRepeats--;
+                    msg_idx = 0;
+                    BK4819_EnterTxMute();  // Ensure silence between broadcasts
+                    next_tick = now + 100; // 100 ticks = 1 second gap between repeats
+                } else {
+                    state = 4;
+                    next_tick = now; 
+                }
+            } else if (beacon_msg[msg_idx] == '-') {
+                BK4819_ExitTxMute();           // key down (dah)
+                next_tick = now + (3 * CW_UNIT_TICKS);
+                state = 2;
+            } else if (beacon_msg[msg_idx] == '.') {
+                BK4819_ExitTxMute();           // key down (dit)
+                next_tick = now + (1 * CW_UNIT_TICKS);
+                state = 2;
+            } else if (beacon_msg[msg_idx] == ' ') {
+                // Already had 1u gap after the previous element (state 2).
+                // Add 2u more for a total 3u inter-character gap.
+                next_tick = now + (2 * CW_UNIT_TICKS);
+                msg_idx++;
+                state = 1;
+            } else {
+                // Unknown symbol — skip it.
+                msg_idx++;
+            }
+            break;
+
+        case 2:
+            // End of dit/dah: mute the TX audio and hold for 1u intra-element gap.
+            BK4819_EnterTxMute();
+            next_tick = now + (1 * CW_UNIT_TICKS);
+            msg_idx++;
+            state = 1;
+            break;
+
+		case 4:
+					// 1. Mute the audio path
+					BK4819_EnterTxMute();
+					
+					// 2. Hard-kill the Power Amplifier immediately 
+					BK4819_SetupPowerAmplifier(0, 0); 
+
+					// Now switch software state
+   					FUNCTION_Select(FUNCTION_FOREGROUND);
+					
+					// 4. Reconfigure hardware registers for RX
+					RADIO_SetupRegisters(true); 
+					
+					// 5. Force UI to clear the TX indicators
+					gUpdateDisplay = true; 
+					
+					gBeaconActive = false;
+					state = 0;
+					break;
+    }
+}
+
 static void ProcessKey(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld);
 
 
@@ -602,6 +726,10 @@ static void CheckRadioInterrupts(void)
 
 		if (interrupts.dtmf5ToneFound) {	
 			const char c = DTMF_GetCharacter(BK4819_GetDTMF_5TONE_Code()); // save the RX'ed DTMF character
+			
+			char dbg[32];
+			sprintf(dbg, "tone: %c\r\n", c);
+			UART_Send((uint8_t*)dbg, strlen(dbg));
 			if (c != 0xff) {
 				if (gCurrentFunction != FUNCTION_TRANSMIT) {
 					if (gSetting_live_DTMF_decoder) {
@@ -614,8 +742,49 @@ static void CheckRadioInterrupts(void)
 						gDTMF_RX_live[len]    = 0;
 						gDTMF_RX_live_timeout = DTMF_RX_live_timeout_500ms;  // time till we delete it
 						gUpdateDisplay        = true;
-					}
+						char dbg[32];
+						sprintf(dbg, "dtmf: %s\r\n", gDTMF_RX_live);
+						UART_Send((uint8_t*)dbg, strlen(dbg));
+						// Check if sequence starts with *2
+						if (strstr(gDTMF_RX_live, "*2") != NULL && strlen(gDTMF_RX_live) == 3) {
+							// Extract the character immediately after *2
+							char power_cmd = gDTMF_RX_live[2]; 
 
+							if (power_cmd >= '1' && power_cmd <= '3') {
+								// Map '1'->LOW (0), '2'->MID (1), '3'->HIGH (2)
+								uint8_t new_power = power_cmd - '1';
+								
+								// Update the active transmit VFO
+								gTxVfo->OUTPUT_POWER = new_power;
+								
+								// Flag the main loop to save the updated channel state to EEPROM
+								gRequestSaveChannel = 1; 
+								
+								// Flag the UI to refresh the H/M/L icon on the top status bar
+								gUpdateStatus = true; 
+								gUpdateDisplay = true;
+							}
+
+							// Clear buffer so *2 doesn't re-trigger
+							memset(gDTMF_RX_live, 0, sizeof(gDTMF_RX_live));
+							UART_Send((uint8_t*)"Power Updated\r\n", 15);
+						}
+						// --- CUSTOM BEACON TRIGGER ---
+						char *ptr_beacon = strstr(gDTMF_RX_live, "*1");
+						if (ptr_beacon != NULL && strlen(ptr_beacon) == 3) {
+							char repeat_cmd = ptr_beacon[2];
+							
+							// Accept values from 1 to 9
+							if (repeat_cmd >= '1' && repeat_cmd <= '9') {
+								gBeaconRepeats = repeat_cmd - '0'; // Convert ASCII char to integer
+								gBeaconActive = true;
+								
+								memset(gDTMF_RX_live, 0, sizeof(gDTMF_RX_live));
+								UART_Send((uint8_t*)"Beacon Triggered\r\n", 18);
+							}
+						}
+						// -----------------------------
+					}
 #ifdef ENABLE_DTMF_CALLING
 					if (gRxVfo->DTMF_DECODING_ENABLE || gSetting_KILLED) {
 						if (gDTMF_RX_index >= sizeof(gDTMF_RX) - 1) { // make room
@@ -793,8 +962,10 @@ static void HandleVox(void)
 }
 #endif
 
+
 void APP_Update(void)
 {
+	BEACON_Process();
 #ifdef ENABLE_VOICE
 	if (gFlagPlayQueuedVoice) {
 			AUDIO_PlayQueuedVoice();

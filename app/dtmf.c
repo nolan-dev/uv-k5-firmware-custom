@@ -33,7 +33,11 @@
 #include "misc.h"
 #include "settings.h"
 #include "ui/ui.h"
+#include "app/app.h"
 
+#include <stdio.h>
+#include <string.h>
+#include "driver/uart.h"
 char              gDTMF_String[15];
 
 char              gDTMF_InputBox[15];
@@ -241,6 +245,7 @@ void DTMF_Append(const char code)
 void DTMF_HandleRequest(void)
 {	// proccess the RX'ed DTMF characters
 
+    
 	char         String[21];
 	unsigned int Offset;
 
@@ -260,7 +265,23 @@ void DTMF_HandleRequest(void)
 	}
 
 	gDTMF_RX_pending = false;
+	// --- CUSTOM BEACON TRIGGER LOGIC ---
+	if (gDTMF_RX_index >= 2)
+	{	// look for "*1"
+		char dbg[32];
+		sprintf(dbg, "gDTMF_RX_index >= 2 \r\n");
+		UART_Send((uint8_t*)dbg, strlen(dbg));
+		char *pBeaconStr = "*1";
+		Offset = gDTMF_RX_index - strlen(pBeaconStr);
 
+		if (CompareMessage(gDTMF_RX + Offset, pBeaconStr, strlen(pBeaconStr), true))
+		{
+			gBeaconActive = true;
+			DTMF_clear_RX();
+			return; // Exit out of normal DTMF parsing
+		}
+	}
+	// -----------------------------------
 	if (gDTMF_RX_index >= 9)
 	{	// look for the KILL code
 
