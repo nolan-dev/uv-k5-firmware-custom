@@ -100,6 +100,12 @@ static const char beacon_msg[] = "-.- --- -.... -. -... --";
 #define CW_UNIT_TICKS 8     // 8 ticks * 10ms = 80ms unit = 15 WPM
 #define CW_FREQ 800
 
+bool BEACON_CssGateOk(void) {
+    if (gRxVfo->pRX->CodeType == CODE_TYPE_CONTINUOUS_TONE) return gFoundCTCSS;
+    if (gRxVfo->pRX->CodeType == CODE_TYPE_DIGITAL)         return gFoundCDCSS;
+    return true;  // no CSS configured on the channel — open access
+}
+
 void BEACON_Process(void) {
     // 1. Hardware-level SysTick Tracker (Runs continuously)
     static uint32_t custom_10ms_ticks = 0;
@@ -221,11 +227,13 @@ static void CheckForIncoming(void)
 		return;          // squelch is closed
 
 #ifdef ENABLE_AUTO_LOG
-	// During SLOW auto-log scan, the scanner walks frequencies looking for
-	// hits and just notes them — we are NOT trying to listen. Suppress the
-	// normal FOREGROUND→INCOMING→RECEIVE pipeline that would enable audio,
-	// toggle the green LED, and contend with the scanner for chip control.
-	if (gAutoLogMode && gAutoLogScanMode == AUTOLOG_SCAN_SLOW)
+	// During SLOW/RSSI auto-log scan, the scanner walks frequencies looking
+	// for hits and just notes them — we are NOT trying to listen. Suppress
+	// the normal FOREGROUND→INCOMING→RECEIVE pipeline that would enable
+	// audio, toggle the green LED, and contend with the scanner for chip
+	// control.
+	if (gAutoLogMode && (gAutoLogScanMode == AUTOLOG_SCAN_SLOW
+	                  || gAutoLogScanMode == AUTOLOG_SCAN_RSSI))
 		return;
 #endif
 
@@ -689,12 +697,13 @@ static void CheckRadioInterrupts(void)
 {
 	// FAST auto-log and the regular CSS scanner poll the BK4819 directly via
 	// BK4819_GetFrequencyScanResult / GetCxCSSScanResult — they don't need
-	// the interrupt-driven squelch flag. SLOW auto-log scan DOES need it
-	// (the squelch-lost interrupt is how we know a stepped frequency has
-	// signal), so allow this function to run in that one case.
+	// the interrupt-driven squelch flag. SLOW + RSSI auto-log modes need
+	// the chip's interrupts processed (squelch IRQ ack, CTCSS detection
+	// updates) so allow this function to run for those modes.
 	if (SCANNER_IsScanning()
 #ifdef ENABLE_AUTO_LOG
-		&& !(gAutoLogMode && gAutoLogScanMode == AUTOLOG_SCAN_SLOW)
+		&& !(gAutoLogMode && (gAutoLogScanMode == AUTOLOG_SCAN_SLOW
+		                   || gAutoLogScanMode == AUTOLOG_SCAN_RSSI))
 #endif
 	)
 		return;
@@ -786,7 +795,7 @@ static void CheckRadioInterrupts(void)
 						// gBeaconInterval == 0 (OFF) blocks DTMF triggers entirely
 						// so a stranger's *1N doesn't make this radio key up.
 						char *ptr_beacon = strstr(gDTMF_RX_live, "*1");
-						if (ptr_beacon != NULL && strlen(ptr_beacon) == 3 && gBeaconInterval > 0) {
+						if (ptr_beacon != NULL && strlen(ptr_beacon) == 3 && gBeaconInterval > 0 && BEACON_CssGateOk()) {
 							char repeat_cmd = ptr_beacon[2];
 
 							// Accept values from 1 to 9

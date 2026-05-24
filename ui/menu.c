@@ -76,7 +76,11 @@ const t_menu_item MenuList[] =
 #endif
 #ifdef ENABLE_AUTO_LOG
 	{"ScanMd", VOICE_ID_INVALID,                       MENU_SCAN_MD       },
+	{"SlwRng", VOICE_ID_INVALID,                       MENU_SLOW_RANGE    },
+	{"Filter", VOICE_ID_INVALID,                       MENU_LOG_FILTER    },
+	{"RssiTh", VOICE_ID_INVALID,                       MENU_RSSI_TH       },
 #endif
+	{"DelAll", VOICE_ID_INVALID,                       MENU_DEL_ALL       },
 
 	{"KeyLck", VOICE_ID_INVALID,                       MENU_AUTOLK        }, // was "AUTOLk"
 	{"TxTOut", VOICE_ID_TRANSMIT_OVER_TIME,            MENU_TOT           }, // was "TOT"
@@ -242,14 +246,50 @@ const char gSubMenu_BCNINT[][4] =
 #endif
 
 #ifdef ENABLE_AUTO_LOG
-// FAST = BK4819 wideband freq counter (fast, lower sensitivity)
-// SLOW = channel-by-channel sweep (slower, full receiver sensitivity)
+// FAST = BK4819 wideband freq counter (fast, low sensitivity)
+// SLOW = full RX setup per channel + squelch interrupt (legacy, sensitive)
+// RSSI = lightweight retune + direct RSSI read (fast AND sensitive)
 const char gSubMenu_SCAN_MD[][5] =
 {
 	"FAST",
-	"SLOW"
+	"SLOW",
+	"RSSI"
+};
+
+// Scope of SLOW mode sweep (ignored in FAST).
+//   ALL  = every firmware band
+//   HAM  = US 2m (144-148) + 70cm (420-450)
+//   RPTR = ham repeater output sub-bands only
+const char gSubMenu_SLOW_RANGE[][5] =
+{
+	"ALL",
+	"HAM",
+	"RPTR"
+};
+
+// Auto-log entry filter. ALL = save everything. CSS = only save hits with
+// CTCSS/DCS identified (skip simplex / no-tone hits).
+const char gSubMenu_LOG_FILTER[][4] =
+{
+	"ALL",
+	"CSS"
+};
+
+// RSSI-mode trigger threshold in dBm (only used when ScanMd=RSSI).
+const char gSubMenu_RSSI_TH[][5] =
+{
+	"-115",
+	"-105",
+	"-90"
 };
 #endif
+
+// Generic NO/YES confirmation submenu. Used by destructive operations.
+const char gSubMenu_NO_YES[][4] =
+{
+	"NO",
+	"YES"
+};
 
 const char* const gSubMenu_MDF[] =
 {
@@ -761,7 +801,19 @@ void UI_DisplayMenu(void)
 		case MENU_SCAN_MD:
 			strcpy(String, gSubMenu_SCAN_MD[gSubMenuSelection]);
 			break;
+		case MENU_SLOW_RANGE:
+			strcpy(String, gSubMenu_SLOW_RANGE[gSubMenuSelection]);
+			break;
+		case MENU_LOG_FILTER:
+			strcpy(String, gSubMenu_LOG_FILTER[gSubMenuSelection]);
+			break;
+		case MENU_RSSI_TH:
+			strcpy(String, gSubMenu_RSSI_TH[gSubMenuSelection]);
+			break;
 #endif
+		case MENU_DEL_ALL:
+			strcpy(String, gSubMenu_NO_YES[gSubMenuSelection]);
+			break;
 
 		case MENU_MDF:
 			strcpy(String, gSubMenu_MDF[gSubMenuSelection]);

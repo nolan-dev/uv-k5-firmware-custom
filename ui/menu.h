@@ -128,8 +128,12 @@ enum
 	MENU_BCNINT,
 #endif
 #ifdef ENABLE_AUTO_LOG
-	MENU_SCAN_MD
+	MENU_SCAN_MD,
+	MENU_SLOW_RANGE,
+	MENU_LOG_FILTER,
+	MENU_RSSI_TH,
 #endif
+	MENU_DEL_ALL
 };
 
 extern const uint8_t FIRST_HIDDEN_MENU_ITEM;
@@ -151,8 +155,12 @@ extern const char        gSubMenu_SC_REV[3][8];
 extern const char        gSubMenu_BCNINT[8][4];
 #endif
 #ifdef ENABLE_AUTO_LOG
-extern const char        gSubMenu_SCAN_MD[2][5];
+extern const char        gSubMenu_SCAN_MD[3][5];
+extern const char        gSubMenu_SLOW_RANGE[3][5];
+extern const char        gSubMenu_LOG_FILTER[2][4];
+extern const char        gSubMenu_RSSI_TH[3][5];
 #endif
+extern const char        gSubMenu_NO_YES[2][4];
 extern const char* const gSubMenu_MDF[4];
 #ifdef ENABLE_ALARM
 	extern const char    gSubMenu_AL_MOD[2][5];

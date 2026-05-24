@@ -279,7 +279,11 @@ void DTMF_HandleRequest(void)
 		{
 #ifdef ENABLE_BEACON
 			// gBeaconInterval == 0 (OFF) blocks the trigger entirely.
-			if (gBeaconInterval > 0)
+			// CSS gate: when channel has CTCSS/DCS configured, require it
+			// to be currently detected (lets the user lock the beacon
+			// behind a specific tone — strangers' DTMF without the right
+			// tone is ignored).
+			if (gBeaconInterval > 0 && BEACON_CssGateOk())
 				gBeaconActive = true;
 #endif
 			DTMF_clear_RX();

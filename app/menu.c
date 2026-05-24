@@ -193,7 +193,23 @@ int MENU_GetLimits(uint8_t menu_id, int32_t *pMin, int32_t *pMax)
 			*pMin = 0;
 			*pMax = ARRAY_SIZE(gSubMenu_SCAN_MD) - 1;
 			break;
+		case MENU_SLOW_RANGE:
+			*pMin = 0;
+			*pMax = ARRAY_SIZE(gSubMenu_SLOW_RANGE) - 1;
+			break;
+		case MENU_LOG_FILTER:
+			*pMin = 0;
+			*pMax = ARRAY_SIZE(gSubMenu_LOG_FILTER) - 1;
+			break;
+		case MENU_RSSI_TH:
+			*pMin = 0;
+			*pMax = ARRAY_SIZE(gSubMenu_RSSI_TH) - 1;
+			break;
 #endif
+		case MENU_DEL_ALL:
+			*pMin = 0;
+			*pMax = ARRAY_SIZE(gSubMenu_NO_YES) - 1;
+			break;
 
 		case MENU_ROGER:
 			*pMin = 0;
@@ -600,7 +616,24 @@ void MENU_AcceptSetting(void)
 		case MENU_SCAN_MD:
 			gAutoLogScanMode = gSubMenuSelection;
 			break;
+		case MENU_SLOW_RANGE:
+			gAutoLogSlowRange = gSubMenuSelection;
+			break;
+		case MENU_LOG_FILTER:
+			gAutoLogFilter = gSubMenuSelection;
+			break;
+		case MENU_RSSI_TH:
+			gAutoLogRssiTh = gSubMenuSelection;
+			break;
 #endif
+		case MENU_DEL_ALL:
+			if (gSubMenuSelection == 1) {  // YES confirmed — wipe MR channels
+				for (uint8_t ch = MR_CHANNEL_FIRST; ch <= MR_CHANNEL_LAST; ch++)
+					SETTINGS_UpdateChannel(ch, NULL, false);
+				gVfoConfigureMode = VFO_CONFIGURE_RELOAD;
+				gFlagResetVfos    = true;
+			}
+			break;
 
 		case MENU_MDF:
 			gEeprom.CHANNEL_DISPLAY_MODE = gSubMenuSelection;
@@ -1016,7 +1049,21 @@ void MENU_ShowCurrentSetting(void)
 		case MENU_SCAN_MD:
 			gSubMenuSelection = gAutoLogScanMode;
 			break;
+		case MENU_SLOW_RANGE:
+			gSubMenuSelection = gAutoLogSlowRange;
+			break;
+		case MENU_LOG_FILTER:
+			gSubMenuSelection = gAutoLogFilter;
+			break;
+		case MENU_RSSI_TH:
+			gSubMenuSelection = gAutoLogRssiTh;
+			break;
 #endif
+		case MENU_DEL_ALL:
+			// Always start at NO — defend against an accidental MENU press
+			// after the user just enters this menu item.
+			gSubMenuSelection = 0;
+			break;
 
 		case MENU_MDF:
 			gSubMenuSelection = gEeprom.CHANNEL_DISPLAY_MODE;

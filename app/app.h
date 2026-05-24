@@ -38,6 +38,10 @@ extern uint8_t  gBeaconInterval;             // 0=off, 1..6 = interval index
 extern uint16_t gBeaconPeriodCountdown_500ms;
 extern const uint16_t beacon_intervals_500ms[];
 void BEACON_Process(void);
+// True if the beacon may be triggered right now: when the current RX channel
+// has a CTCSS/DCS code configured, require that code to be currently
+// detected. When no code is configured, allow trigger (open access).
+bool BEACON_CssGateOk(void);
 #endif
 
 #endif

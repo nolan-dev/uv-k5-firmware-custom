@@ -18,7 +18,9 @@
 #include "app/dtmf.h"
 #include "app/generic.h"
 #include "app/menu.h"
+#include "app/chFrScanner.h"
 #include "app/scanner.h"
+#include "driver/systick.h"
 #ifdef ENABLE_AUTO_LOG
 	#include "app/autolog.h"
 #endif
@@ -52,6 +54,101 @@ uint8_t           scanHitCount;
 // to VHF, second flips to UHF, etc.
 static uint8_t autolog_lna_phase;  // 0=off, 1=VHF, 2=UHF (cycles 1→2→1→...)
 
+// dBm (offset by 160) captured at the moment a SLOW/RSSI hit is detected.
+// Reading RSSI in STATE_SCANNING (CSS scan mode) is unreliable, so we save
+// the value while still in normal RX and use it at record time.
+static uint8_t autolog_hit_rssi;
+
+// Last freq the RSSI sweep tuned the chip to. Used to skip redundant retunes
+// across consecutive STATE_OFF ticks. Reset to 0 whenever the chip config is
+// disturbed (e.g., transition to STATE_SCANNING) so the next sweep iteration
+// re-tunes cleanly.
+static uint32_t rssi_tuned_freq;
+
+// Configure the BK4819 for spectrum-style RSSI sweep. Mirrors ToggleRX(false)
+// from app/spectrum.c: audio path off, AFDAC bit off, AFBit off, and writes
+// the specific REG_43 value spectrum uses for scanning (different from what
+// BK4819_SetFilterBandwidth produces). This is the critical chip state that
+// makes RSSI reads valid during sweep instead of saturated/stuck.
+static void autolog_rssi_sweep_setup(void) {
+	AUDIO_AudioPathOff();
+	// AFDAC off — REG_30 bit 9.
+	{
+		const uint16_t r = BK4819_ReadRegister(BK4819_REG_30);
+		BK4819_WriteRegister(BK4819_REG_30, r & ~(1u << 9));
+	}
+	// AFBit off — REG_47 bit 8.
+	{
+		const uint16_t r = BK4819_ReadRegister(BK4819_REG_47);
+		BK4819_WriteRegister(BK4819_REG_47, r & ~(1u << 8));
+	}
+	// REG_43 scan-mode bandwidth (25 kHz integration window).
+	BK4819_WriteRegister(BK4819_REG_43, 0b0011011000101000);
+	// Force re-tune on the next sweep tick.
+	rssi_tuned_freq = 0;
+}
+
+// US ham repeater output sub-bands (frequencies in 10 Hz units).
+// Used by AUTOLOG_RANGE_RPTR — restricts SLOW sweep to where repeaters live.
+typedef struct { uint32_t lower; uint32_t upper; } slow_range_t;
+static const slow_range_t repeater_ranges[] = {
+	{14520000, 14550000},  // 2m  145.20-145.50 MHz
+	{14661000, 14739000},  // 2m  146.61-147.39 MHz
+	{44200000, 44500000},  // 70cm 442.00-445.00 MHz
+	{44700000, 45000000},  // 70cm 447.00-450.00 MHz
+};
+
+// Advance freq for SLOW mode based on the current range setting. Returns
+// the next frequency to tune to. Caller updates gRxVfo and reconfigures.
+static uint32_t slow_advance_freq(void)
+{
+	uint32_t f = gRxVfo->freq_config_RX.Frequency + gRxVfo->StepFrequency;
+
+#ifdef ENABLE_SCAN_RANGES
+	if (gScanRangeStart) {
+		f = APP_SetFreqByStepAndLimits(gRxVfo, 1,
+		        gScanRangeStart, gScanRangeStop);
+		gRxVfo->Band = FREQUENCY_GetBand(f);
+		return f;
+	}
+#endif
+
+	if (gAutoLogSlowRange == AUTOLOG_RANGE_HAM) {
+		if (f >= 14800000 && f < 42000000)
+			f = 42000000;   // jump past gap from 2m end to 70cm start
+		else if (f >= 45000000)
+			f = 14400000;   // wrap 70cm end → 2m start
+		gRxVfo->Band = FREQUENCY_GetBand(f);
+		return f;
+	}
+
+	if (gAutoLogSlowRange == AUTOLOG_RANGE_RPTR) {
+		// Step into the next repeater sub-band when we walk off the end
+		// of the current one (or jump in from outside all of them).
+		for (uint8_t i = 0; i < ARRAY_SIZE(repeater_ranges); i++) {
+			if (f < repeater_ranges[i].upper) {
+				if (f < repeater_ranges[i].lower)
+					f = repeater_ranges[i].lower;
+				gRxVfo->Band = FREQUENCY_GetBand(f);
+				return f;
+			}
+		}
+		f = repeater_ranges[0].lower;  // past last range — wrap
+		gRxVfo->Band = FREQUENCY_GetBand(f);
+		return f;
+	}
+
+	// AUTOLOG_RANGE_ALL: sweep every firmware band, wrapping at boundaries.
+	if (f >= frequencyBandTable[gRxVfo->Band].upper) {
+		uint8_t next = gRxVfo->Band + 1;
+		if (next >= BAND_N_ELEM)
+			next = 0;
+		f             = frequencyBandTable[next].lower;
+		gRxVfo->Band  = next;
+	}
+	return f;
+}
+
 static void AUTOLOG_RecordAndResume(void)
 {
 	if (!gAutoLogMode || gCssBackgroundScan)
@@ -72,22 +169,30 @@ static void AUTOLOG_RecordAndResume(void)
 	}
 
 	if (!dup) {
-		if (gAutoLogCount >= MAX_AUTO_LOGS) {
+		// Filter: when CSS-only, drop hits without CTCSS/DCS identified.
+		// The scan still advances (handled below) — we just don't record.
+		if (gAutoLogFilter == AUTOLOG_FILTER_CSS && !gScanUseCssResult) {
+			// fall through to the state reset + advance below
+		} else if (gAutoLogCount >= MAX_AUTO_LOGS) {
 			// buffer full: stop sweeping, leave state at FOUND so the
 			// user's EXIT press routes through SCANNER_Stop for flush.
 			gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
 			return;
-		}
+		} else {
 
 		gAutoLogs[gAutoLogCount].frequency = freq;
 		gAutoLogs[gAutoLogCount].code_type = gScanUseCssResult ? gScanCssResultType : CODE_TYPE_OFF;
 		gAutoLogs[gAutoLogCount].code_val  = gScanUseCssResult ? gScanCssResultCode : 0;
 		gAutoLogs[gAutoLogCount].hit_count = 1;
-		// Capture signal strength as dBm (using the same conversion the radio's
-		// main display uses) offset by 160 so it fits in a uint8_t.
-		gAutoLogs[gAutoLogCount].rssi = (uint8_t)(BK4819_GetRSSI_dBm() + 160);
+		// Signal strength. SLOW/RSSI modes captured this at the moment of
+		// detection (normal RX); FAST reads it fresh from the chip's
+		// freq-counter path. dBm offset by 160 so it fits in a uint8_t.
+		gAutoLogs[gAutoLogCount].rssi = (gAutoLogScanMode == AUTOLOG_SCAN_FAST)
+			? (uint8_t)(BK4819_GetRSSI_dBm() + 160)
+			: autolog_hit_rssi;
 		gAutoLogCount++;
 		gBeepToPlay = BEEP_1KHZ_60MS_OPTIONAL;
+		}
 	}
 
 	// kick state machine back to phase 1 (frequency hunt).
@@ -98,13 +203,19 @@ static void AUTOLOG_RecordAndResume(void)
 	scanHitCount           = 0;
 	gScanProgressIndicator = 0;
 
-	if (gAutoLogScanMode == AUTOLOG_SCAN_SLOW) {
-		// SLOW: advance to the next freq step so a continuous carrier
-		// doesn't re-trigger us at the same frequency forever.
-		gRxVfo->freq_config_RX.Frequency = APP_SetFrequencyByStep(gRxVfo, 1);
+	if (gAutoLogScanMode == AUTOLOG_SCAN_SLOW ||
+	    gAutoLogScanMode == AUTOLOG_SCAN_RSSI) {
+		// SLOW/RSSI: advance to next freq so a continuous carrier doesn't
+		// re-trigger us forever. RADIO_SetupRegisters here restores normal
+		// RX state (was put into CSS scan mode by the STATE_SCANNING path).
+		gRxVfo->freq_config_RX.Frequency = slow_advance_freq();
 		RADIO_ApplyOffset(gRxVfo);
 		RADIO_ConfigureSquelchAndOutputPower(gRxVfo);
 		RADIO_SetupRegisters(true);
+		// RSSI mode: re-enter spectrum-style sweep config so the next
+		// STATE_OFF tick gets valid RSSI readings.
+		if (gAutoLogScanMode == AUTOLOG_SCAN_RSSI)
+			autolog_rssi_sweep_setup();
 	} else {
 		// FAST: restart the wideband freq counter
 		gScanFrequency = 0xFFFFFFFF;
@@ -414,13 +525,15 @@ void SCANNER_Start(bool singleFreq)
 		gScanCssState  = SCAN_CSS_STATE_OFF;
 
 #ifdef ENABLE_AUTO_LOG
-		if (gAutoLogMode && gAutoLogScanMode == AUTOLOG_SCAN_SLOW) {
-			// SLOW: stay tuned at the VFO's current frequency with the
-			// normal RX path. STATE_OFF's tick handler will step + check
-			// squelch from here.
+		if (gAutoLogMode && (gAutoLogScanMode == AUTOLOG_SCAN_SLOW
+		                  || gAutoLogScanMode == AUTOLOG_SCAN_RSSI)) {
+			// SLOW/RSSI: leave the chip in normal RX. STATE_OFF will step
+			// frequencies + check signal presence from here. No BK4819
+			// freq-counter setup (FAST-only).
 			gScanFrequency = gRxVfo->pRX->Frequency;
 			BK4819_PickRXFilterPathBasedOnFrequency(gScanFrequency);
-			// no BK4819_EnableFrequencyScan — using normal squelch path
+			if (gAutoLogScanMode == AUTOLOG_SCAN_RSSI)
+				autolog_rssi_sweep_setup();
 		} else
 #endif
 		{
@@ -490,6 +603,51 @@ void SCANNER_TimeSlice10ms(void)
 	switch (gScanCssState) {
 		case SCAN_CSS_STATE_OFF: {
 #ifdef ENABLE_AUTO_LOG
+			if (gAutoLogMode && gAutoLogScanMode == AUTOLOG_SCAN_RSSI) {
+				// RSSI sweep — tune + strobe + wait + read all in the same
+				// tick (like the fagci spectrum analyzer). The chip has
+				// already been put into sweep config by SCANNER_Start /
+				// AUTOLOG_RecordAndResume; we just step + measure here.
+				if (rssi_tuned_freq != gRxVfo->pRX->Frequency) {
+					BK4819_SetFrequency(gRxVfo->pRX->Frequency);
+					BK4819_PickRXFilterPathBasedOnFrequency(gRxVfo->pRX->Frequency);
+					// Strobe REG_30 to reset RSSI integration.
+					const uint16_t r30 = BK4819_ReadRegister(BK4819_REG_30);
+					BK4819_WriteRegister(BK4819_REG_30, 0);
+					BK4819_WriteRegister(BK4819_REG_30, r30);
+					rssi_tuned_freq = gRxVfo->pRX->Frequency;
+				}
+				// Wait for the glitch indicator to settle below max.
+				while ((BK4819_ReadRegister(0x63) & 0xFF) >= 255)
+					SYSTICK_DelayUs(100);
+				const uint16_t rssi = BK4819_GetRSSI();
+
+				if (rssi >= autolog_rssi_thresholds[gAutoLogRssiTh]) {
+					// Capture RSSI NOW — STATE_SCANNING / CSS scan mode
+					// gives unreliable readings (rssi/2 fits in uint8_t for
+					// any sane signal, matches dBm+160 storage).
+					autolog_hit_rssi       = (uint8_t)(rssi >> 1);
+					gScanFrequency         = gRxVfo->pRX->Frequency;
+					scanHitCount           = 0;
+					gScanCssResultCode     = 0xFF;
+					gScanCssResultType     = 0xFF;
+					gScanUseCssResult      = false;
+					gScanProgressIndicator = 0;
+					RADIO_ConfigureSquelchAndOutputPower(gRxVfo);
+					RADIO_SetupRegisters(true);
+					BK4819_SetScanFrequency(gScanFrequency);
+					gScanCssState   = SCAN_CSS_STATE_SCANNING;
+					gScanDelay_10ms = 9;
+					rssi_tuned_freq = 0;  // force retune when we return
+				} else {
+					// Advance to next freq; actual chip retune happens at
+					// the top of the next tick (above) once gRxVfo->freq
+					// differs from rssi_tuned_freq.
+					gRxVfo->freq_config_RX.Frequency = slow_advance_freq();
+					gScanDelay_10ms = 1;  // ~10 ms per channel
+				}
+				break;
+			}
 			if (gAutoLogMode && gAutoLogScanMode == AUTOLOG_SCAN_SLOW) {
 				// SLOW mode: full-sensitivity squelch check at each freq.
 				// On squelch open → log freq-only and advance. CTCSS/DCS
@@ -499,12 +657,23 @@ void SCANNER_TimeSlice10ms(void)
 				// of the firmware has been flaky. For CTCSS-bearing
 				// channels, use FAST mode instead (works correctly).
 				if (g_SquelchLost) {
-					gScanFrequency    = gRxVfo->pRX->Frequency;
-					gScanUseCssResult = false;
-					AUTOLOG_RecordAndResume();  // records + advances one step
+					// Signal detected — capture RSSI now (CSS scan mode
+					// makes it unreliable), then transition to STATE_SCANNING
+					// for CTCSS/DCS detection (up to 2s timeout if no code
+					// is found, set by SCANNER_TimeSlice500ms).
+					autolog_hit_rssi       = (uint8_t)(BK4819_GetRSSI_dBm() + 160);
+					gScanFrequency         = gRxVfo->pRX->Frequency;
+					scanHitCount           = 0;
+					gScanCssResultCode     = 0xFF;
+					gScanCssResultType     = 0xFF;
+					gScanUseCssResult      = false;
+					gScanProgressIndicator = 0;
+					BK4819_SetScanFrequency(gScanFrequency);
+					gScanCssState          = SCAN_CSS_STATE_SCANNING;
+					gScanDelay_10ms        = 9;
+					break;
 				} else {
-					gRxVfo->freq_config_RX.Frequency =
-						APP_SetFrequencyByStep(gRxVfo, 1);
+					gRxVfo->freq_config_RX.Frequency = slow_advance_freq();
 					RADIO_ApplyOffset(gRxVfo);
 					RADIO_ConfigureSquelchAndOutputPower(gRxVfo);
 					RADIO_SetupRegisters(true);
@@ -623,6 +792,18 @@ void SCANNER_TimeSlice10ms(void)
 
 void SCANNER_TimeSlice500ms(void)
 {
+#ifdef ENABLE_AUTO_LOG
+	// Battery-low watchdog. When the radio reports the battery icon at "low"
+	// (≤ level 1, roughly ≤5% / sub-6.30V), do the final flush + stop the
+	// scan. This gives us roughly a minute to write everything before the
+	// chip browns out. Otherwise we keep accumulating in RAM so we can do a
+	// single sorted flush — most-interesting first — at exit.
+	if (gAutoLogMode && gBatteryDisplayLevel <= 1) {
+		SCANNER_Stop();
+		gRequestDisplayScreen = DISPLAY_MAIN;
+	}
+#endif
+
 	if (SCANNER_IsScanning() && gScannerSaveState == SCAN_SAVE_NO_PROMPT && gScanCssState < SCAN_CSS_STATE_FOUND) {
 		gScanProgressIndicator++;
 #ifndef ENABLE_NO_CODE_SCAN_TIMEOUT
@@ -645,12 +826,12 @@ void SCANNER_TimeSlice500ms(void)
 			AUTOLOG_RecordAndResume();
 		}
 
-		// LNA multiplex: in STATE_OFF, flip VHF↔UHF LNA every 4 ticks (2 s)
-		// so distant signals like NOAA (~S6) can break through. First flip
-		// happens at tick 1 (0.5 s) to minimize the both-off warm-up window
-		// SCANNER_Start sets up. STATE_SCANNING is left alone so CTCSS
-		// detection isn't interrupted.
+		// LNA multiplex: only in FAST STATE_OFF. SLOW and RSSI manage LNA
+		// per step themselves (RADIO_SetupRegisters / PickRXFilterPath
+		// picks the right path), and overriding it would put the chip on
+		// the wrong LNA for the current step frequency.
 		if (gAutoLogMode && !gCssBackgroundScan &&
+			gAutoLogScanMode == AUTOLOG_SCAN_FAST &&
 			gScanCssState == SCAN_CSS_STATE_OFF &&
 			(gScanProgressIndicator & 3) == 1) {
 			autolog_lna_phase = (autolog_lna_phase == 1) ? 2 : 1;
